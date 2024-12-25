@@ -1,21 +1,20 @@
-use std::{collections::HashMap, sync::Arc};
-use std::fs;
-use rand::seq::SliceRandom;
 use async_trait::async_trait;
+use rand::seq::SliceRandom;
+use reqwest::{
+    header::{HeaderMap, HeaderValue, ACCEPT, COOKIE, USER_AGENT},
+    Client, Proxy,
+};
+use reqwest::{Error as ReqwestError, Url};
 use serde_derive::Deserialize;
 use std::error::Error;
 use std::fmt;
-use reqwest::{header::{HeaderMap, HeaderValue, ACCEPT, COOKIE, USER_AGENT}, Client, Proxy};
-use reqwest::{Error as ReqwestError, Url};
+use std::fs;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
-use tokio::sync::RwLock; 
+use tokio::sync::RwLock;
 
-
-use actix_web::{web, App, HttpServer, Responder, HttpResponse};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use env_logger;
-
-
-
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -29,8 +28,13 @@ async fn main() -> std::io::Result<()> {
     let cookie_url = "https://www.property.com.au/".to_string();
     let api_key = "b46ad9c3eaa157dcbc0a884ec2f1be72bce1d7a7".to_string();
     let premium_proxy = false;
-    
-    let zenrows_handler = ZenrowsCookiesHandler::new(cookie_url, api_key, premium_proxy, Some(Box::new(BrightDataRandomProxyHandler::new(proxies.clone()))));
+
+    let zenrows_handler = ZenrowsCookiesHandler::new(
+        cookie_url,
+        api_key,
+        premium_proxy,
+        Some(Box::new(BrightDataRandomProxyHandler::new(proxies.clone()))),
+    );
 
     let zenrows_handler = Arc::new(zenrows_handler);
     let proxy_handler = Arc::new(Mutex::new(BrightDataRandomProxyHandler::new(proxies)));
@@ -47,7 +51,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(request_handler_api.clone())) // Pass the Arc<Mutex<AsyncRequestHandler>>
             .route("/request", web::get().to(request_handler)) // Route all requests to the same handler
     })
-    .bind("0.0.0.0:5000")?
+    .bind("0.0.0.0:6000")?
     .workers(1)
     .run()
     .await
@@ -62,7 +66,7 @@ async fn request_handler(
 
     let allowed_domains = vec!["www.property.com.au"];
     let url = &request_data.url;
-    
+
     // Parse the URL from the query string
     let parsed_url = match Url::parse(&url) {
         Ok(url) => url,
@@ -80,8 +84,11 @@ async fn request_handler(
     // let handler = property_request_handler.lock().await;
     let handler = property_request_handler.read().await;
     match handler.make_request(&parsed_url.to_string()).await {
-        Ok(body) => HttpResponse::Ok().json(serde_json::json!({ "status_code": 200, "body": body })),
-        Err(_) => HttpResponse::TooManyRequests().json(serde_json::json!({ "status_code": 429, "body": "" })),
+        Ok(body) => {
+            HttpResponse::Ok().json(serde_json::json!({ "status_code": 200, "body": body }))
+        }
+        Err(_) => HttpResponse::TooManyRequests()
+            .json(serde_json::json!({ "status_code": 429, "body": "" })),
     }
 }
 
@@ -115,7 +122,7 @@ impl CookieManager {
 }
 pub struct AsyncRequestHandler {
     cookies_handler: Option<Arc<dyn BaseCookiesHandler + Send + Sync>>,
-    proxy_handler: Option<Arc<Mutex<dyn ProxyHandler + Send + Sync>>>,  // Mutex inside Arc
+    proxy_handler: Option<Arc<Mutex<dyn ProxyHandler + Send + Sync>>>, // Mutex inside Arc
     lock: Arc<Mutex<bool>>,
     headers: HeaderMap,
     cookies: Arc<CookieManager>,
@@ -124,7 +131,7 @@ pub struct AsyncRequestHandler {
 impl AsyncRequestHandler {
     pub fn new(
         cookies_handler: Option<Arc<dyn BaseCookiesHandler + Send + Sync>>,
-        proxy_handler: Option<Arc<Mutex<dyn ProxyHandler + Send + Sync>>>,  // Updated to Arc<Mutex>
+        proxy_handler: Option<Arc<Mutex<dyn ProxyHandler + Send + Sync>>>, // Updated to Arc<Mutex>
     ) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -139,22 +146,22 @@ impl AsyncRequestHandler {
         AsyncRequestHandler {
             cookies_handler,
             proxy_handler,
-            lock:  Arc::new(Mutex::new(false)),
+            lock: Arc::new(Mutex::new(false)),
             headers,
             cookies: Arc::new(CookieManager::new()),
         }
     }
 
-    pub async fn refresh(&self) {
+    pub async fn refresh(&self,url:&str) {
         // Acquire the lock
         let mut guard = match self.lock.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
-                println!("Task 2 could not acquire the lock, it is already locked.");
+                println!("Task 2 could not acquire the lock, it is already locked. {:?}",url);
                 return;
             }
         };
-    
+        println!("The task locked by {:?}",url);
         let cookies_handler = self.cookies_handler.clone(); // Clone the handler for async operations
         let current_cookies = self.cookies.get_cookies().await;
         *guard = true;
@@ -179,23 +186,19 @@ impl AsyncRequestHandler {
             }
         }
         *guard = false;
-      
-        
-  
-        
     }
-    
-    
+
     pub async fn make_request(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
         println!("Starting request to URL: {}", url);
-    
+
         let mut attempts = 0;
         let max_attempts = 3; // Define max attempts here for easier adjustments
         loop {
             let guard = self.lock.lock().await;
+            println!("processing after lock url: {:?}", url);
             drop(guard);
             attempts += 1;
-    
+
             // Proxy setup logic
             let proxy_url = if let Some(ref handler) = self.proxy_handler {
                 let handler = handler.lock().await; // Await the lock
@@ -203,47 +206,56 @@ impl AsyncRequestHandler {
             } else {
                 None
             };
-    
+
             let proxy = match proxy_url {
                 Some(ref url) => Proxy::all(url)?,
                 None => Proxy::all("")?, // Default proxy (could be handled better)
             };
-    
-            let client = Client::builder()
-                .proxy(proxy)
-                .build()?;
+
+            let client = Client::builder().proxy(proxy).build()?;
 
             let mut headers = self.headers.clone();
-            let cookie_string: String = self.cookies.get_cookies().await.iter()
-                        .filter(|(key, _)| *key == "KP_UIDz-ssn" || *key == "KP_UIDz") // Dereference the `key` here
-                        .map(|(key, value)| format!("{}={}", key, value))
-                        .collect::<Vec<String>>()
-                        .join("; ");
+            let cookie_string: String = self
+                .cookies
+                .get_cookies()
+                .await
+                .iter()
+                .filter(|(key, _)| *key == "KP_UIDz-ssn" || *key == "KP_UIDz") // Dereference the `key` here
+                .map(|(key, value)| format!("{}={}", key, value))
+                .collect::<Vec<String>>()
+                .join("; ");
 
+            headers.insert(
+                COOKIE,
+                HeaderValue::from_str(&cookie_string).map_err(|e| CookieException {
+                    message: format!("Failed to set cookie header: {}", e),
+                })?,
+            );
 
-    
-            headers.insert(COOKIE, HeaderValue::from_str(&cookie_string).map_err(|e| CookieException {
-                message: format!("Failed to set cookie header: {}", e),
-            })?);
-            
-            let response = client
-                .get(url)
-                .headers(headers)
-                .send()
-                .await?;
-    
+            let response = client.get(url).headers(headers).send().await?;
+
             match response.status().as_u16() {
                 200 => {
                     let body = response.text().await?;
+                    if body.is_empty() {
+                        println!("The response is empty");
+                        self.refresh(&url).await;
+                        continue;
+                    }
                     return Ok(body);
                 }
                 429 => {
-                    println!("Received status 429 (Too Many Requests). Retrying...");
-                    self.refresh().await;
+                    println!(
+                        "Received status 429 (Too Many Requests). Retrying... {:?}",
+                        url
+                    );
+                    self.refresh(&url).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
                 403 => {
-                    println!("Received status 403 (Forbidden). Trying to change proxy or other actions.");
+                    println!(
+                        "Received status 403 (Forbidden). Trying to change proxy or other actions."
+                    );
                     // You might want to add proxy removal or change logic here
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 }
@@ -252,15 +264,12 @@ impl AsyncRequestHandler {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             }
-    
+
             if attempts >= max_attempts {
                 return Err("Failed to make successful request after 3 attempts".into());
             }
         }
     }
-    
-
-
 }
 
 // cookie handeler
@@ -295,7 +304,7 @@ pub trait BaseCookiesHandler {
 }
 
 // Example implementation of BaseCookiesHandler
-pub struct ZenrowsCookiesHandler{
+pub struct ZenrowsCookiesHandler {
     cookie_url: String,
     api_key: String,
     premium_proxy: bool,
@@ -308,7 +317,7 @@ impl ZenrowsCookiesHandler {
         api_key: String,
         premium_proxy: bool,
         proxy_handler: Option<Box<dyn ProxyHandler>>,
-    )->Self{
+    ) -> Self {
         ZenrowsCookiesHandler {
             cookie_url,
             api_key,
@@ -331,11 +340,9 @@ impl ZenrowsCookiesHandler {
 
 #[async_trait]
 impl BaseCookiesHandler for ZenrowsCookiesHandler {
-    
     async fn generate(&self) -> Result<HashMap<String, String>, CookieException> {
         println!("cook gen called");
-      
-    
+
         let mut params = vec![
             ("url", self.cookie_url.clone()),
             ("apikey", self.api_key.clone()),
@@ -373,7 +380,7 @@ impl BaseCookiesHandler for ZenrowsCookiesHandler {
         })?;
 
         let cookies = Self::parse_cookies(cookie_string);
-        println!("hey {:?}",cookies);
+        println!("hey {:?}", cookies);
 
         Ok(cookies)
     }
@@ -382,55 +389,53 @@ impl BaseCookiesHandler for ZenrowsCookiesHandler {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"));
         headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"));
-        
+
         // Format cookies into a single string to pass as the Cookie header
-        let cookie_string: String = cookies.iter()
-                .filter(|(key, _)| *key == "KP_UIDz-ssn" || *key == "KP_UIDz") // Dereference the `key` here
-                .map(|(key, value)| format!("{}={}", key, value))
-                .collect::<Vec<String>>()
-                .join("; ");
+        let cookie_string: String = cookies
+            .iter()
+            .filter(|(key, _)| *key == "KP_UIDz-ssn" || *key == "KP_UIDz") // Dereference the `key` here
+            .map(|(key, value)| format!("{}={}", key, value))
+            .collect::<Vec<String>>()
+            .join("; ");
 
-
-        
-        headers.insert(COOKIE, HeaderValue::from_str(&cookie_string).map_err(|e| CookieException {
-            message: format!("Failed to set cookie header: {}", e),
-        })?);
-        println!("{:?}",headers);
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&cookie_string).map_err(|e| CookieException {
+                message: format!("Failed to set cookie header: {}", e),
+            })?,
+        );
+        println!("{:?}", headers);
 
         let proxy = Proxy::all(self.proxy_handler.as_ref().unwrap().get_proxy().unwrap())?;
 
-        let client = Client::builder()
-                .proxy(proxy)
-                .build()?;
+        let client = Client::builder().proxy(proxy).build()?;
         let res = client
             .get(self.cookie_url.clone())
             .headers(headers)
             .send()
             .await?;
-        
+
         if res.status().is_success() {
-                let body = res.text().await?;
-                
-                // Check that the body is not empty
-                if !body.is_empty() {
-                    println!("{}", body);
-                } else {
-                    eprintln!("Empty response body received.");
-                    return Err(CookieException {
-                        message: "Empty response body".to_string(),
-                    });
-                }
+            let body = res.text().await?;
+
+            // Check that the body is not empty
+            if !body.is_empty() {
+                println!("{}", body);
             } else {
-                eprintln!("Request failed with status: {}", res.status());
+                eprintln!("Empty response body received.");
                 return Err(CookieException {
-                    message: format!("Request failed with status: {}", res.status()),
+                    message: "Empty response body".to_string(),
                 });
             }
+        } else {
+            eprintln!("Request failed with status: {}", res.status());
+            return Err(CookieException {
+                message: format!("Request failed with status: {}", res.status()),
+            });
+        }
         Ok(())
     }
 }
-
-
 
 // Proxy handler implementation
 pub trait ProxyHandler: Send + Sync {
@@ -488,23 +493,19 @@ pub fn load_proxies(path: &str) -> Vec<String> {
     }
 }
 
-
 // #[tokio::main]
 // async fn main() {
 //     println!("Hello, world!");
-    
+
 //     // Load proxies from file
 //     let proxies = load_proxies("/home/ragu/Desktop/src/.config/proxies.txt");
-    
 
-    
 //     // Set up the ZenrowsCookiesHandler
 //     let cookie_url = "https://www.property.com.au/".to_string();
 //     let api_key = "b46ad9c3eaa157dcbc0a884ec2f1be72bce1d7a7".to_string();
 //     let premium_proxy = false;
-    
-//     let zenrows_handler = ZenrowsCookiesHandler::new(cookie_url, api_key, premium_proxy, Some(Box::new( BrightDataRandomProxyHandler::new(proxies.clone()))));
 
+//     let zenrows_handler = ZenrowsCookiesHandler::new(cookie_url, api_key, premium_proxy, Some(Box::new( BrightDataRandomProxyHandler::new(proxies.clone()))));
 
 //     let zenrows_handler = Arc::new(zenrows_handler);
 //     let proxy_handler = Arc::new(Mutex::new( BrightDataRandomProxyHandler::new(proxies)));
@@ -515,6 +516,4 @@ pub fn load_proxies(path: &str) -> Vec<String> {
 //     let res = request_api.make_request("https://www.property.com.au/search/?locations=Advancetown%2C+QLD+4211&propertyStatus=FOR_SALE&pageNumber=1&surroundingSuburbs=false").await;
 //     println!("{:?}",res)
 
-
 // }
-
