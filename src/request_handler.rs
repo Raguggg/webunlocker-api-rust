@@ -1,3 +1,4 @@
+use log::{error, info, warn};
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, COOKIE, USER_AGENT},
     Client, Proxy,
@@ -74,13 +75,14 @@ impl AsyncRequestHandler {
             Ok(guard) => guard,
             Err(_) => {
                 println!(
-                    "Task 2 could not acquire the lock, it is already locked. {:?}",
+                    "Task could not acquire the lock, it is already locked. {:?}",
                     url
                 );
                 return;
             }
         };
         println!("The task locked by {:?}", url);
+        info!("Refreshing cookies.");
         let cookies_handler = self.cookies_handler.clone(); // Clone the handler for async operations
         let current_cookies = self.cookies.get_cookies().await;
         *guard = true;
@@ -88,17 +90,24 @@ impl AsyncRequestHandler {
             match cookies_handler.validate(&current_cookies).await {
                 Ok(_) => {
                     println!("Cookies are valid.");
+                    info!("Cookies validated successfully.");
                 }
-                Err(_) => {
+                Err(e) => {
+                    warn!(
+                        "Cookie validation failed, generating new cookies: {}",
+                        e.message
+                    );
                     println!("Cookies validation failed. Generating new cookies.");
                     match cookies_handler.generate().await {
                         Ok(new_cookies) => {
                             // Update shared cookies after re-acquiring the lock
                             self.cookies.set_cookies(new_cookies).await;
                             println!("New cookies generated and stored.");
+                            info!("New cookies generated successfully.");
                         }
                         Err(e) => {
                             eprintln!("Failed to generate cookies: {}", e.message);
+                            error!("Failed to generate cookies: {}", e.message);
                         }
                     }
                 }
@@ -109,12 +118,13 @@ impl AsyncRequestHandler {
 
     pub async fn make_request(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
         println!("Starting request to URL: {}", url);
+        info!("Starting request to URL: {}", url);
 
         let mut attempts = 0;
         let max_attempts = 3; // Define max attempts here for easier adjustments
         loop {
             let guard = self.lock.lock().await;
-            println!("processing after lock url: {:?}", url);
+            // println!("processing after lock url: {:?}", url);
             drop(guard);
             attempts += 1;
 
@@ -158,6 +168,7 @@ impl AsyncRequestHandler {
                     let body = response.text().await?;
                     if body.is_empty() {
                         println!("The response is empty");
+                        warn!("The response is empty");
                         self.refresh(&url).await;
                         continue;
                     }
@@ -168,6 +179,10 @@ impl AsyncRequestHandler {
                         "Received status 429 (Too Many Requests). Retrying... {:?}",
                         url
                     );
+                    warn!(
+                        "Received status 429 (Too Many Requests). Retrying... {:?}",
+                        url
+                    );
                     self.refresh(&url).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
@@ -175,11 +190,16 @@ impl AsyncRequestHandler {
                     println!(
                         "Received status 403 (Forbidden). Trying to change proxy or other actions."
                     );
+                    error!(
+                        "Received status 403 (Forbidden). Trying to change proxy or other actions."
+                    );
+
                     // You might want to add proxy removal or change logic here
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 }
                 _ => {
                     println!("Request failed with status: {}", response.status());
+                    error!("Request failed with status: {}", response.status());
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             }

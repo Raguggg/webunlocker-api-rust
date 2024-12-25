@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use log::{error, info};
 use reqwest::Error as ReqwestError;
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, COOKIE, USER_AGENT},
@@ -98,6 +99,7 @@ impl BaseCookiesHandler for ZenrowsCookiesHandler {
             .map_err(|e| CookieException {
                 message: format!("Request failed: {}", e),
             })?;
+        info!("Successfully generated cookies. Using ZenRows API.");
 
         if !response.status().is_success() {
             return Err(CookieException {
@@ -141,7 +143,11 @@ impl BaseCookiesHandler for ZenrowsCookiesHandler {
                 message: format!("Failed to set cookie header: {}", e),
             })?,
         );
-        println!("{:?}", headers);
+
+        info!(
+            "Validating cookies in ZenRowsCookiesHandler for cookies: {:?}",
+            headers
+        );
 
         let proxy = Proxy::all(self.proxy_handler.as_ref().unwrap().get_proxy().unwrap())?;
 
@@ -157,15 +163,20 @@ impl BaseCookiesHandler for ZenrowsCookiesHandler {
 
             // Check that the body is not empty
             if !body.is_empty() {
-                println!("{}", body);
+                info!("Cookies is valid")
             } else {
                 eprintln!("Empty response body received.");
+                error!("Cookie is invalid because of Empty response body received.");
                 return Err(CookieException {
                     message: "Empty response body".to_string(),
                 });
             }
         } else {
             eprintln!("Request failed with status: {}", res.status());
+            error!(
+                "Cookie is invalid because of Request failed with status: {:?}",
+                res.status()
+            );
             return Err(CookieException {
                 message: format!("Request failed with status: {}", res.status()),
             });
