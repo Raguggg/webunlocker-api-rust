@@ -193,7 +193,10 @@ impl AsyncRequestHandler {
                     error!(
                         "Received status 403 (Forbidden). Trying to change proxy or other actions."
                     );
-
+                    if let Some(ref handler) = self.proxy_handler {
+                        let mut handler = handler.lock().await; // Await the lock
+                        handler.remove(&proxy_url.unwrap())
+                    } ;
                     // You might want to add proxy removal or change logic here
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 }
